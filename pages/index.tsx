@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { io, Socket } from 'socket.io-client';
 import {
   PeerHandle,
   PeerCallbacks,
@@ -8,8 +7,24 @@ import {
   sendFile,
   downloadBlob,
 } from '../lib/webrtc';
+import { Signaling } from '../lib/signaling';
 
 type Status = 'disconnected' | 'connecting' | 'waiting' | 'connected';
+
+// 시그널링 Worker 베이스 (환경변수로 주입, 기본은 동일 호스트의 /ws 가정)
+function signalingBase(): string {
+  const envBase =
+    typeof process !== 'undefined'
+      ? process.env.NEXT_PUBLIC_SIGNALING_URL
+      : undefined;
+  if (envBase) return envBase;
+  // 동일 오리진 fallback (로컬 하니스/프록시)
+  if (typeof window !== 'undefined') {
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${window.location.host}`;
+  }
+  return '';
+}
 
 export default function HomePage() {
   const [roomId, setRoomId] = useState('');
@@ -22,17 +37,36 @@ export default function HomePage() {
   const [showLog, setShowLog] = useState(false);
   const [notice, setNotice] = useState('');
 
-  // --- WebRTC/소켓 상태는 전부 ref (stale closure 방지) ---
-  const socketRef = useRef<Socket | null>(null);
+  // --- WebRTC/시그널링 상태는 전부 ref (stale closure 방지) ---
+  const sigRef = useRef<Signaling | null>(null);
   const peerRef = useRef<PeerHandle | null>(null);
   const remoteIdRef = useRef<string | null>(null);
   const roomIdRef = useRef('');
+  const iceServersRef = useRef<RTCIceServer[] | undefined>(undefined);
 
   const addLog = useCallback((msg: string) => {
     // eslint-disable-next-line no-console
     console.log(msg);
     setLog((prev) => [...prev.slice(-200), msg]);
   }, []);
+
+  // TURN credential 미리 로드 (Worker /turn-credentials)
+  useEffect(() => {
+    const base = signalingBase();
+    if (!base) return;
+    const httpBase = base.replace(/^ws/, 'http');
+    fetch(`${httpBase}/turn-credentials`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d && Array.isArray(d.iceServers)) {
+          iceServersRef.current = d.iceServers;
+          addLog(`[ICE] servers loaded: ${d.iceServers.length}`);
+        }
+      })
+      .catch(() => {
+        /* STUN 기본값 사용 */
+      });
+  }, [addLog]);
 
   const makeCallbacks = useCallback(
     (): PeerCallbacks => ({
@@ -57,12 +91,17 @@ export default function HomePage() {
     [addLog],
   );
 
-  // 상대와의 Peer를 1개 보장
   const ensurePeer = useCallback(
     (remoteId: string, polite: boolean): PeerHandle => {
       if (peerRef.current) return peerRef.current;
       remoteIdRef.current = remoteId;
-      const handle = createPeer(socketRef.current!, remoteId, polite, makeCallbacks());
+      const handle = createPeer(
+        sigRef.current!,
+        remoteId,
+        polite,
+        makeCallbacks(),
+        iceServersRef.current,
+      );
       peerRef.current = handle;
       return handle;
     },
@@ -80,133 +119,114 @@ export default function HomePage() {
     }
     peerRef.current = null;
     remoteIdRef.current = null;
-    setStatus(socketRef.current?.connected ? 'waiting' : 'disconnected');
   }, []);
 
-  // 소켓 1회 연결 + 시그널링 핸들러 (ref만 사용하므로 재구독 불필요)
-  useEffect(() => {
-    const socket = io(window.location.origin, {
-      path: '/socket.io/',
-      transports: ['websocket', 'polling'],
-    });
-    socketRef.current = socket;
-
-    socket.on('connect', () => {
-      addLog(`[Socket] connected: ${socket.id}`);
-      if (roomIdRef.current) {
+  // 시그널링 핸들러 등록 (sig 연결마다)
+  const wireSignaling = useCallback(
+    (sig: Signaling) => {
+      sig.on('connect', () => {
+        addLog('[Sig] connected');
         setStatus('waiting');
-        socket.emit('create_or_join_room', roomIdRef.current);
-      }
-    });
+      });
+      sig.on('disconnect', () => {
+        addLog('[Sig] disconnected');
+        teardownPeer();
+        if (joined) setStatus('connecting');
+      });
+      sig.on('connect_error', (e: any) =>
+        addLog(`[Sig] error: ${e?.message}`),
+      );
 
-    socket.on('disconnect', () => {
-      addLog('[Socket] disconnected');
-      teardownPeer();
-      setStatus('disconnected');
-    });
+      sig.on('room_joined', (d: any) => {
+        addLog(`[Room] joined. total=${d.totalClients}`);
+        setStatus(d.totalClients > 1 ? 'connecting' : 'waiting');
+      });
 
-    socket.on('connect_error', (e: Error) =>
-      addLog(`[Socket] connect_error: ${e.message}`),
-    );
+      sig.on('room_full', () => {
+        setNotice('이 방은 이미 2명이 사용 중이에요. 다른 방 번호를 쓰세요.');
+        setStatus('disconnected');
+        setJoined(false);
+        sig.disconnect();
+      });
 
-    socket.on('room_joined', (data: { totalClients: number }) => {
-      addLog(`[Room] joined. total=${data.totalClients}`);
-      setStatus(data.totalClients > 1 ? 'connecting' : 'waiting');
-    });
-
-    socket.on('room_full', () => {
-      setNotice('이 방은 이미 2명이 사용 중이에요. 다른 방 번호를 쓰세요.');
-      setStatus('disconnected');
-      setJoined(false);
-    });
-
-    // 내가 신규 입장자(impolite) → 내가 offer 시작 + DataChannel 생성
-    socket.on(
-      'start_negotiation',
-      (data: { peerId: string; polite: boolean }) => {
-        addLog(`[Neg] start_negotiation peer=${data.peerId} polite=${data.polite}`);
+      // 신규 입장자(impolite) → offer 시작 + DataChannel 생성
+      sig.on('start_negotiation', (d: any) => {
+        addLog(`[Neg] start peer=${d.peerId} polite=${d.polite}`);
         setStatus('connecting');
-        const handle = ensurePeer(data.peerId, data.polite);
-        createSendChannel(handle, makeCallbacks()); // onnegotiationneeded 트리거
-      },
-    );
+        const handle = ensurePeer(d.peerId, d.polite);
+        createSendChannel(handle, makeCallbacks());
+      });
 
-    // 기존 입장자(polite) → 상대 등장 통지 (offer 대기)
-    socket.on('peer_joined', (data: { peerId: string; polite: boolean }) => {
-      addLog(`[Neg] peer_joined peer=${data.peerId} polite=${data.polite}`);
-      setStatus('connecting');
-      ensurePeer(data.peerId, data.polite);
-    });
+      // 기존 입장자(polite) → 상대 등장 (offer 대기)
+      sig.on('peer_joined', (d: any) => {
+        addLog(`[Neg] peer_joined peer=${d.peerId} polite=${d.polite}`);
+        setStatus('connecting');
+        ensurePeer(d.peerId, d.polite);
+      });
 
-    socket.on('peer_left', () => {
-      addLog('[Room] peer left');
-      teardownPeer();
-      setNotice('상대가 나갔어요.');
-    });
+      sig.on('peer_left', () => {
+        addLog('[Room] peer left');
+        teardownPeer();
+        setNotice('상대가 나갔어요.');
+        setStatus('waiting');
+      });
 
-    // --- Perfect Negotiation 시그널 처리 ---
-    socket.on(
-      'offer',
-      async (data: { senderId: string; sdp: RTCSessionDescriptionInit }) => {
-        const handle = ensurePeer(data.senderId, peerRef.current?.polite ?? true);
+      sig.on('offer', async (d: any) => {
+        const handle = ensurePeer(d.senderId, peerRef.current?.polite ?? true);
         const pc = handle.pc;
-        const offerCollision =
-          handle.makingOffer || pc.signalingState !== 'stable';
-        handle.ignoreOffer = !handle.polite && offerCollision;
+        const collision = handle.makingOffer || pc.signalingState !== 'stable';
+        handle.ignoreOffer = !handle.polite && collision;
         if (handle.ignoreOffer) {
-          addLog('[Neg] ignoring offer (impolite collision)');
+          addLog('[Neg] ignore offer (impolite collision)');
           return;
         }
-        await pc.setRemoteDescription(data.sdp);
+        await pc.setRemoteDescription(d.sdp);
         await pc.setLocalDescription();
-        socket.emit('answer', {
-          targetId: data.senderId,
-          sdp: pc.localDescription,
-        });
-        addLog('[Neg] answered offer');
-      },
-    );
+        sig.emit('answer', { targetId: d.senderId, sdp: pc.localDescription });
+        addLog('[Neg] answered');
+      });
 
-    socket.on(
-      'answer',
-      async (data: { senderId: string; sdp: RTCSessionDescriptionInit }) => {
+      sig.on('answer', async (d: any) => {
         const handle = peerRef.current;
         if (!handle) return;
         try {
-          await handle.pc.setRemoteDescription(data.sdp);
+          await handle.pc.setRemoteDescription(d.sdp);
           addLog('[Neg] applied answer');
         } catch (e) {
-          addLog(`[Neg] answer error: ${String(e)}`);
+          addLog(`[Neg] answer err: ${String(e)}`);
         }
-      },
-    );
+      });
 
-    socket.on(
-      'ice_candidate',
-      async (data: { senderId: string; candidate: RTCIceCandidateInit }) => {
+      sig.on('ice_candidate', async (d: any) => {
         const handle = peerRef.current;
-        if (!handle || !data.candidate) return;
+        if (!handle || !d.candidate) return;
         try {
-          await handle.pc.addIceCandidate(data.candidate);
+          await handle.pc.addIceCandidate(d.candidate);
         } catch (e) {
-          if (!handle.ignoreOffer) {
-            addLog(`[Neg] addIceCandidate error: ${String(e)}`);
-          }
+          if (!handle.ignoreOffer) addLog(`[Neg] ice err: ${String(e)}`);
         }
-      },
-    );
+      });
+    },
+    [addLog, ensurePeer, makeCallbacks, teardownPeer, joined],
+  );
 
-    return () => {
-      socket.disconnect();
-      if (peerRef.current) {
-        peerRef.current.pc.close();
-        peerRef.current = null;
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // 방 입장: 새 WS 연결(URL에 room 포함)
+  const connectRoom = useCallback(
+    (id: string) => {
+      // 기존 연결 정리
+      sigRef.current?.disconnect();
+      teardownPeer();
+      const base = signalingBase();
+      const sig = new Signaling(`${base}/ws?room=${encodeURIComponent(id)}`);
+      sigRef.current = sig;
+      wireSignaling(sig);
+      setStatus('connecting');
+      sig.connect();
+    },
+    [teardownPeer, wireSignaling],
+  );
 
-  // URL ?room=xxxx 자동 입장 (공유 링크 / 실기기 테스트용)
+  // URL ?room=xxxx 자동 입장
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const r = params.get('room');
@@ -215,16 +235,12 @@ export default function HomePage() {
       setRoomId(id);
       roomIdRef.current = id;
       setJoined(true);
-      const trySend = () => {
-        if (socketRef.current?.connected) {
-          setStatus('waiting');
-          socketRef.current.emit('create_or_join_room', id);
-        } else {
-          setTimeout(trySend, 300);
-        }
-      };
-      trySend();
+      connectRoom(id);
     }
+    return () => {
+      sigRef.current?.disconnect();
+      if (peerRef.current) peerRef.current.pc.close();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -237,22 +253,15 @@ export default function HomePage() {
     roomIdRef.current = id;
     setJoined(true);
     setNotice('');
-    if (socketRef.current?.connected) {
-      setStatus('waiting');
-      socketRef.current.emit('create_or_join_room', id);
-    } else {
-      setStatus('connecting');
-    }
+    connectRoom(id);
   };
 
   const handleLeave = () => {
+    sigRef.current?.disconnect();
     teardownPeer();
     roomIdRef.current = '';
     setJoined(false);
-    setStatus(socketRef.current?.connected ? 'disconnected' : 'disconnected');
-    // 서버는 방을 떠나도 소켓 유지 → 재입장 가능하도록 소켓 재연결
-    socketRef.current?.disconnect();
-    socketRef.current?.connect();
+    setStatus('disconnected');
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -365,10 +374,7 @@ export default function HomePage() {
 
         {notice && <div style={styles.notice}>{notice}</div>}
 
-        <button
-          style={styles.logToggle}
-          onClick={() => setShowLog((v) => !v)}
-        >
+        <button style={styles.logToggle} onClick={() => setShowLog((v) => !v)}>
           {showLog ? '로그 숨기기' : '로그 보기'}
         </button>
         {showLog && (
@@ -399,9 +405,7 @@ function Progress({
         <span>{pct}%</span>
       </div>
       <div style={styles.progTrack}>
-        <div
-          style={{ ...styles.progFill, width: `${pct}%`, background: color }}
-        />
+        <div style={{ ...styles.progFill, width: `${pct}%`, background: color }} />
       </div>
     </div>
   );
@@ -415,8 +419,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'flex-start',
     justifyContent: 'center',
     padding: '24px 16px',
-    fontFamily:
-      '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',
+    fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',
   },
   card: {
     width: '100%',

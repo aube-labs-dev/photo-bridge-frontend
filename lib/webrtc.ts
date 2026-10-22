@@ -1,6 +1,6 @@
 // Photo Bridge — WebRTC P2P 파일전송 코어 (프레임워크 비의존, useRef에서 사용)
 // 핵심: 상태는 호출측 ref에 저장하고, 이 모듈은 순수 로직만 제공한다.
-import type { Socket } from 'socket.io-client';
+import type { Signaling } from './signaling';
 
 export const CHUNK_SIZE = 16 * 1024; // 16KB
 const BUFFER_THRESHOLD = 256 * 1024; // 역압 임계 256KB
@@ -57,12 +57,15 @@ export interface PeerCallbacks {
 // Perfect Negotiation 기반 Peer 생성. handle.dc 는 송신자(impolite)가 생성하거나
 // 수신측에서 ondatachannel 로 채워진다.
 export function createPeer(
-  socket: Socket,
+  socket: Signaling,
   remoteId: string,
   polite: boolean,
   cb: PeerCallbacks,
+  iceServers?: RTCIceServer[],
 ): PeerHandle {
-  const pc = new RTCPeerConnection(buildIceConfig());
+  const pc = new RTCPeerConnection(
+    iceServers ? { iceServers } : buildIceConfig(),
+  );
   const handle: PeerHandle = {
     pc,
     dc: null,
