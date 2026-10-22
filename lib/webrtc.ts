@@ -74,7 +74,10 @@ export function createPeer(
 
   pc.onicecandidate = ({ candidate }) => {
     if (candidate) {
+      cb.onLog(`[ICE] local cand: ${candidate.type} ${candidate.protocol}`);
       socket.emit('ice_candidate', { targetId: remoteId, candidate });
+    } else {
+      cb.onLog('[ICE] gathering complete');
     }
   };
 

@@ -206,6 +206,28 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // URL ?room=xxxx 자동 입장 (공유 링크 / 실기기 테스트용)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const r = params.get('room');
+    if (r && r.trim()) {
+      const id = r.trim();
+      setRoomId(id);
+      roomIdRef.current = id;
+      setJoined(true);
+      const trySend = () => {
+        if (socketRef.current?.connected) {
+          setStatus('waiting');
+          socketRef.current.emit('create_or_join_room', id);
+        } else {
+          setTimeout(trySend, 300);
+        }
+      };
+      trySend();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleJoin = () => {
     const id = roomId.trim();
     if (!id) {
