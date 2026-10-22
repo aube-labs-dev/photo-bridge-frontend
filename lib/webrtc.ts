@@ -1,0 +1,236 @@
+// Photo Bridge — WebRTC P2P 파일전송 코어 (프레임워크 비의존, useRef에서 사용)
+// 핵심: 상태는 호출측 ref에 저장하고, 이 모듈은 순수 로직만 제공한다.
+import type { Socket } from 'socket.io-client';
+
+export const CHUNK_SIZE = 16 * 1024; // 16KB
+const BUFFER_THRESHOLD = 256 * 1024; // 역압 임계 256KB
+
+export interface IceConfig {
+  iceServers: RTCIceServer[];
+}
+
+export function buildIceConfig(): IceConfig {
+  const servers: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+  ];
+  // 선택적 TURN (환경변수 주입)
+  const turnUrl =
+    typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_TURN_URL : undefined;
+  const turnUser =
+    typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_TURN_USER : undefined;
+  const turnCred =
+    typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_TURN_CRED : undefined;
+  if (turnUrl) {
+    servers.push({ urls: turnUrl, username: turnUser, credential: turnCred });
+  }
+  return { iceServers: servers };
+}
+
+export interface FileMeta {
+  fileName: string;
+  fileType: string;
+  totalSize: number;
+}
+
+interface FileReceiver {
+  buffer: Uint8Array[];
+  receivedSize: number;
+  meta: FileMeta;
+}
+
+export interface PeerHandle {
+  pc: RTCPeerConnection;
+  dc: RTCDataChannel | null;
+  receiver: FileReceiver | null;
+  makingOffer: boolean;
+  ignoreOffer: boolean;
+  polite: boolean;
+}
+
+export interface PeerCallbacks {
+  onLog: (msg: string) => void;
+  onConnectionState: (state: RTCPeerConnectionState) => void;
+  onRecvProgress: (received: number, total: number, fileName: string) => void;
+  onRecvComplete: (blob: Blob, fileName: string) => void;
+}
+
+// Perfect Negotiation 기반 Peer 생성. handle.dc 는 송신자(impolite)가 생성하거나
+// 수신측에서 ondatachannel 로 채워진다.
+export function createPeer(
+  socket: Socket,
+  remoteId: string,
+  polite: boolean,
+  cb: PeerCallbacks,
+): PeerHandle {
+  const pc = new RTCPeerConnection(buildIceConfig());
+  const handle: PeerHandle = {
+    pc,
+    dc: null,
+    receiver: null,
+    makingOffer: false,
+    ignoreOffer: false,
+    polite,
+  };
+
+  pc.onicecandidate = ({ candidate }) => {
+    if (candidate) {
+      socket.emit('ice_candidate', { targetId: remoteId, candidate });
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    cb.onLog(`[WebRTC] connection: ${pc.connectionState}`);
+    cb.onConnectionState(pc.connectionState);
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    cb.onLog(`[WebRTC] ice: ${pc.iceConnectionState}`);
+  };
+
+  // Perfect Negotiation: 협상 필요 시 offer 생성
+  pc.onnegotiationneeded = async () => {
+    try {
+      handle.makingOffer = true;
+      await pc.setLocalDescription();
+      socket.emit('offer', { targetId: remoteId, sdp: pc.localDescription });
+      cb.onLog('[WebRTC] sent offer (negotiationneeded)');
+    } catch (err) {
+      cb.onLog(`[WebRTC] negotiationneeded error: ${String(err)}`);
+    } finally {
+      handle.makingOffer = false;
+    }
+  };
+
+  // 수신측: 상대가 만든 DataChannel 수신
+  pc.ondatachannel = (event) => {
+    cb.onLog(`[WebRTC] datachannel received: ${event.channel.label}`);
+    handle.dc = event.channel;
+    setupDataChannel(handle, cb);
+  };
+
+  return handle;
+}
+
+// impolite(송신 시작자)가 DataChannel을 선제 생성할 때 호출
+export function createSendChannel(handle: PeerHandle, cb: PeerCallbacks): void {
+  const dc = handle.pc.createDataChannel('file_transfer');
+  handle.dc = dc;
+  setupDataChannel(handle, cb);
+}
+
+function setupDataChannel(handle: PeerHandle, cb: PeerCallbacks): void {
+  const dc = handle.dc!;
+  dc.binaryType = 'arraybuffer';
+  dc.bufferedAmountLowThreshold = BUFFER_THRESHOLD / 2;
+
+  dc.onopen = () => cb.onLog(`[DataChannel] open (${dc.label})`);
+  dc.onclose = () => cb.onLog(`[DataChannel] close (${dc.label})`);
+  dc.onerror = (e: Event) => {
+    const err = (e as RTCErrorEvent).error;
+    cb.onLog(`[DataChannel] error: ${err ? err.message : 'unknown'}`);
+  };
+
+  dc.onmessage = (event: MessageEvent) => {
+    const data = event.data;
+    if (typeof data === 'string') {
+      try {
+        const json = JSON.parse(data);
+        if (json.type === 'file_info') {
+          handle.receiver = {
+            buffer: [],
+            receivedSize: 0,
+            meta: {
+              fileName: json.fileName,
+              fileType: json.fileType,
+              totalSize: json.totalSize,
+            },
+          };
+          cb.onLog(
+            `[File] incoming: ${json.fileName} (${json.totalSize} bytes)`,
+          );
+          cb.onRecvProgress(0, json.totalSize, json.fileName);
+        } else if (json.type === 'file_end') {
+          const r = handle.receiver;
+          if (r) {
+            const blob = new Blob(r.buffer as BlobPart[], {
+              type: r.meta.fileType || 'application/octet-stream',
+            });
+            cb.onLog(`[File] complete: ${r.meta.fileName}`);
+            cb.onRecvComplete(blob, r.meta.fileName);
+            handle.receiver = null;
+          }
+        }
+      } catch {
+        cb.onLog(`[DataChannel] text: ${data}`);
+      }
+      return;
+    }
+    // 바이너리 청크 (arraybuffer 고정)
+    const r = handle.receiver;
+    if (!r) return;
+    const chunk =
+      data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(0);
+    r.buffer.push(chunk);
+    r.receivedSize += chunk.byteLength;
+    cb.onRecvProgress(r.receivedSize, r.meta.totalSize, r.meta.fileName);
+  };
+}
+
+// 역압을 적용한 파일 송신. onProgress(sent, total)
+export async function sendFile(
+  handle: PeerHandle,
+  file: File,
+  onProgress: (sent: number, total: number) => void,
+  onLog: (msg: string) => void,
+): Promise<void> {
+  const dc = handle.dc;
+  if (!dc || dc.readyState !== 'open') {
+    throw new Error(`DataChannel not open (state: ${dc?.readyState})`);
+  }
+
+  // 1. 메타 전송
+  dc.send(
+    JSON.stringify({
+      type: 'file_info',
+      fileName: file.name,
+      fileType: file.type || 'application/octet-stream',
+      totalSize: file.size,
+    }),
+  );
+
+  // 2. 청크 전송 (역압 적용)
+  let offset = 0;
+  while (offset < file.size) {
+    // 버퍼 과다 시 비우길 대기
+    if (dc.bufferedAmount > BUFFER_THRESHOLD) {
+      await new Promise<void>((resolve) => {
+        const handler = () => {
+          dc.removeEventListener('bufferedamountlow', handler);
+          resolve();
+        };
+        dc.addEventListener('bufferedamountlow', handler);
+      });
+    }
+    const slice = file.slice(offset, offset + CHUNK_SIZE);
+    const buf = await slice.arrayBuffer();
+    dc.send(buf);
+    offset += buf.byteLength;
+    onProgress(offset, file.size);
+  }
+
+  // 3. 완료 신호
+  dc.send(JSON.stringify({ type: 'file_end', fileName: file.name }));
+  onLog(`[File] sent complete: ${file.name}`);
+}
+
+// 수신 Blob 다운로드 (모바일 브라우저 공통)
+export function downloadBlob(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
