@@ -57,6 +57,8 @@ export default function HomePage() {
   const recvIdRef = useRef(0);
   // 링버퍼 초과분 자동저장 큐 (updater 밖, useEffect에서 소비)
   const overflowRef = useRef<{ url: string; blob: Blob; name: string }[]>([]);
+  // 방 QR 코드 canvas
+  const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // --- WebRTC/시그널링 상태는 전부 ref (stale closure 방지) ---
   const sigRef = useRef<Signaling | null>(null);
@@ -270,6 +272,27 @@ export default function HomePage() {
     );
   }, [recvImages]);
 
+  // 방 QR 코드 생성 (대기 중일 때 canvas에 방 링크 QR)
+  useEffect(() => {
+    if (!joined || status === 'connected') return;
+    const canvas = qrCanvasRef.current;
+    if (!canvas) return;
+    const link = `${window.location.origin}/?room=${roomIdRef.current}`;
+    let cancelled = false;
+    import('qrcode').then((QR) => {
+      if (cancelled || !qrCanvasRef.current) return;
+      const draw = (QR as any).toCanvas || (QR as any).default?.toCanvas;
+      draw(qrCanvasRef.current, link, {
+        width: 180,
+        margin: 1,
+        color: { dark: '#1f2937', light: '#ffffff' },
+      }).catch(() => {});
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [joined, status]);
+
   // URL ?room=xxxx 자동 입장
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -464,9 +487,12 @@ export default function HomePage() {
         {joined && status !== 'connected' && (
           <div style={styles.shareBox}>
             <p style={styles.shareHint}>
-              상대에게 아래 링크(또는 방 번호 <b>{roomIdRef.current}</b>)를 보내
-              같은 방으로 들어오게 하세요.
+              상대가 아래 QR을 스캔하거나, 링크(방 번호 <b>{roomIdRef.current}</b>)로
+              같은 방에 들어오면 연결돼요.
             </p>
+            <div style={styles.qrWrap}>
+              <canvas ref={qrCanvasRef} style={styles.qrCanvas} />
+            </div>
             <div style={styles.shareBtnRow}>
               <button style={styles.btnShare} onClick={shareRoomLink}>
                 링크 공유
@@ -728,6 +754,19 @@ const styles: Record<string, React.CSSProperties> = {
   },
   shareHint: { fontSize: 13, color: '#475569', margin: '0 0 10px', lineHeight: 1.5 },
   shareBtnRow: { display: 'flex', gap: 8 },
+  qrWrap: {
+    display: 'flex',
+    justifyContent: 'center',
+    margin: '4px 0 12px',
+  },
+  qrCanvas: {
+    width: 180,
+    height: 180,
+    borderRadius: 12,
+    border: '1px solid #e5e7eb',
+    background: '#fff',
+    padding: 8,
+  },
   btnShare: {
     flex: 1,
     padding: '10px',
