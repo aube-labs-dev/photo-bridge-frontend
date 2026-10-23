@@ -28,6 +28,11 @@ function signalingBase(): string {
   return '';
 }
 
+// 한 번에 보낼 수 있는 최대 장수
+const MAX_FILES = 50;
+// 수신 갤러리에 메모리로 유지하는 최대 장수 (초과 시 오래된 것부터 자동 저장+해제)
+const MAX_RECV = 50;
+
 export default function HomePage() {
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
@@ -50,6 +55,8 @@ export default function HomePage() {
   } | null>(null);
   const [copied, setCopied] = useState(false);
   const recvIdRef = useRef(0);
+  // 링버퍼 초과분 자동저장 큐 (updater 밖, useEffect에서 소비)
+  const overflowRef = useRef<{ url: string; blob: Blob; name: string }[]>([]);
 
   // --- WebRTC/시그널링 상태는 전부 ref (stale closure 방지) ---
   const sigRef = useRef<Signaling | null>(null);
@@ -98,9 +105,17 @@ export default function HomePage() {
       onRecvComplete: (blob, fileName) => {
         const url = URL.createObjectURL(blob);
         const id = ++recvIdRef.current;
-        setRecvImages((prev) => [...prev, { id, url, blob, name: fileName }]);
+        setRecvImages((prev) => {
+          const next = [...prev, { id, url, blob, name: fileName }];
+          if (next.length > MAX_RECV) {
+            // 초과분은 ref 큐에 쌓아두고 useEffect에서 자동저장 처리
+            const overflow = next.slice(0, next.length - MAX_RECV);
+            overflowRef.current.push(...overflow);
+            return next.slice(next.length - MAX_RECV);
+          }
+          return next;
+        });
         setRecvPct(null);
-        setNotice('');
       },
     }),
     [addLog],
@@ -241,6 +256,20 @@ export default function HomePage() {
     [teardownPeer, wireSignaling],
   );
 
+  // 링버퍼 초과분 자동저장 (recvImages 갱신 후 큐 소비 — 부수효과를 렌더 밖에서)
+  useEffect(() => {
+    if (overflowRef.current.length === 0) return;
+    const items = overflowRef.current;
+    overflowRef.current = [];
+    items.forEach((img) => {
+      downloadBlob(img.blob, img.name);
+      URL.revokeObjectURL(img.url);
+    });
+    setNotice(
+      `받은 사진이 ${MAX_RECV}장을 넘어 오래된 사진은 자동 저장했어요.`,
+    );
+  }, [recvImages]);
+
   // URL ?room=xxxx 자동 입장
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -286,6 +315,12 @@ export default function HomePage() {
     const handle = peerRef.current;
     if (!handle || !handle.dc || handle.dc.readyState !== 'open') {
       setNotice('상대와 연결되면 보낼 수 있어요.');
+      return;
+    }
+    if (files.length > MAX_FILES) {
+      setNotice(
+        `한 번에 최대 ${MAX_FILES}장까지 보낼 수 있어요. (선택: ${files.length}장) 나눠서 보내주세요.`,
+      );
       return;
     }
     const total = files.length;
@@ -502,7 +537,7 @@ export default function HomePage() {
               {recvImages.map((img) => (
                 <div key={img.id} style={styles.thumbWrap}>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={img.url} alt={img.name} style={styles.thumb} />
+                  <img src={img.url} alt={img.name} loading="lazy" style={styles.thumb} />
                   <button
                     style={styles.saveBtn}
                     onClick={() => saveImage(img)}
