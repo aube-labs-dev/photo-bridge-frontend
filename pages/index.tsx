@@ -95,8 +95,10 @@ export default function HomePage() {
     (): PeerCallbacks => ({
       onLog: addLog,
       onConnectionState: (st) => {
-        if (st === 'connected') setStatus('connected');
-        else if (st === 'failed' || st === 'disconnected' || st === 'closed') {
+        if (st === 'connected') {
+          setStatus('connected');
+          setNotice(''); // 재연결 완료 시 '상대가 나갔어요' 등 이전 안내 제거
+        } else if (st === 'failed' || st === 'disconnected' || st === 'closed') {
           setStatus('waiting');
         }
       },
@@ -185,6 +187,7 @@ export default function HomePage() {
       sig.on('start_negotiation', (d: any) => {
         addLog(`[Neg] start peer=${d.peerId} polite=${d.polite}`);
         setStatus('connecting');
+        setNotice(''); // 상대 재등장 → 이전 '나갔어요' 안내 제거
         const handle = ensurePeer(d.peerId, d.polite);
         createSendChannel(handle, makeCallbacks());
       });
@@ -193,6 +196,7 @@ export default function HomePage() {
       sig.on('peer_joined', (d: any) => {
         addLog(`[Neg] peer_joined peer=${d.peerId} polite=${d.polite}`);
         setStatus('connecting');
+        setNotice(''); // 상대 재등장 → 이전 '나갔어요' 안내 제거
         ensurePeer(d.peerId, d.polite);
       });
 
