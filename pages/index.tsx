@@ -9,6 +9,7 @@ import {
   shareFile,
   shareFiles,
   sendFlowControl,
+  sendAllDone,
   canShareFile,
 } from '../lib/webrtc';
 import { Signaling } from '../lib/signaling';
@@ -127,6 +128,10 @@ export default function HomePage() {
       },
       onFlowControl: () => {
         /* 송신측 콜백 — 수신측에서는 사용 안 함 (대기는 sendFile 내부 처리) */
+      },
+      onAllDone: () => {
+        // 송신 완료: '나머지 계속 받는 중' 류의 안내를 정리
+        setNotice('');
       },
     }),
     [addLog],
@@ -260,7 +265,23 @@ export default function HomePage() {
       sigRef.current?.disconnect();
       teardownPeer();
       const base = signalingBase();
-      const sig = new Signaling(`${base}/ws?room=${encodeURIComponent(id)}`);
+      // 탭별 고유 키(ck): iOS 백그라운드 복귀 등 재접속 시 서버가 같은 ck의
+      // 좀비 소켓을 교체하도록 해 room_full 오거부를 방지한다.
+      let ck = '';
+      try {
+        ck = sessionStorage.getItem('pb_ck') || '';
+        if (!ck) {
+          ck =
+            (crypto as any)?.randomUUID?.() ||
+            `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          sessionStorage.setItem('pb_ck', ck);
+        }
+      } catch {
+        ck = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      }
+      const sig = new Signaling(
+        `${base}/ws?room=${encodeURIComponent(id)}&ck=${encodeURIComponent(ck)}`,
+      );
       sigRef.current = sig;
       wireSignaling(sig);
       setStatus('connecting');
@@ -362,6 +383,8 @@ export default function HomePage() {
       setNotice(
         total === 1 ? '사진을 보냈어요.' : `사진 ${total}장을 보냈어요.`,
       );
+      // 수신측에 전송 완료 알림 (수신측 '계속 받는 중' notice 정리)
+      if (handle) sendAllDone(handle);
       setTimeout(() => setSendBatch(null), 1200);
     } catch (err) {
       setNotice(`보내기 실패: ${String(err)}`);
@@ -369,27 +392,40 @@ export default function HomePage() {
     }
   };
 
-  // 받은 사진 1장 저장 (네이티브 공유 시트 → 사진/파일 앱 선택, 미지원 시 다운로드)
+  // 받은 사진 1장 저장. iOS=공유 시트(사진/파일 앱 선택), 그 외=다운로드(Downloads→갤러리)
   const saveImage = async (img: {
     blob: Blob;
     name: string;
   }) => {
-    const shared = await shareFile(img.blob, img.name);
-    if (!shared) downloadBlob(img.blob, img.name);
+    if (saveViaShare) {
+      const shared = await shareFile(img.blob, img.name);
+      if (!shared) downloadBlob(img.blob, img.name);
+    } else {
+      downloadBlob(img.blob, img.name);
+    }
   };
 
-  // 받은 사진 전체 저장 — 한 번의 공유 시트로 저장 위치(사진/파일 앱) 선택
+  // 받은 사진 전체 저장. iOS=한 번의 공유 시트로 사진/파일 앱 선택,
+  // Android/데스크톱=순차 다운로드(Downloads→갤러리 자동 반영)
   const saveAllImages = async () => {
     if (recvImages.length === 0) return;
-    const items = recvImages.map((img) => ({ blob: img.blob, name: img.name }));
-    const shared = await shareFiles(items);
-    if (shared) return; // 공유 시트에서 사용자가 저장 위치 선택
-    // 공유 미지원 브라우저(데스크톱 등) 폴백: 순차 다운로드
+    addLog(`[UI] 전체 저장 클릭: ${recvImages.length}장`);
+    if (saveViaShare) {
+      const items = recvImages.map((img) => ({ blob: img.blob, name: img.name }));
+      const shared = await shareFiles(items, addLog);
+      if (shared) return; // 공유 시트에서 사용자가 저장 위치 선택
+      // iOS인데 공유 실패 → 개별 저장 안내(무반응 방지)
+      setNotice(
+        '저장 창을 열지 못했어요. 각 사진의 ‘저장 / 공유’ 버튼으로 한 장씩 저장해 주세요.',
+      );
+      return;
+    }
+    // Android/데스크톱: 다운로드 (Android는 Downloads→갤러리 자동, 데스크톱은 다운로드 폴더)
     for (const img of recvImages) {
       downloadBlob(img.blob, img.name);
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 250));
     }
-    setNotice(`${recvImages.length}장 저장했어요.`);
+    setNotice(`${recvImages.length}장 저장했어요. (사진/다운로드 앱에서 확인)`);
   };
 
   const clearReceived = () => {
@@ -400,13 +436,15 @@ export default function HomePage() {
   // 배치 저장 후 계속: 현재 갤러리를 저장 → 비우고 → 송신측에 재개 신호
   const saveBatchAndContinue = async () => {
     if (recvImages.length > 0) {
-      const items = recvImages.map((img) => ({
-        blob: img.blob,
-        name: img.name,
-      }));
-      const shared = await shareFiles(items);
-      if (!shared) {
-        // 공유 미지원(데스크톱 등) 폴백: 순차 다운로드
+      if (saveViaShare) {
+        // iOS: 공유 시트로 사진 앱 저장
+        const items = recvImages.map((img) => ({
+          blob: img.blob,
+          name: img.name,
+        }));
+        await shareFiles(items, addLog);
+      } else {
+        // Android/데스크톱: 순차 다운로드(Android는 Downloads→갤러리 자동)
         for (const img of recvImages) {
           downloadBlob(img.blob, img.name);
           await new Promise((r) => setTimeout(r, 200));
@@ -425,6 +463,21 @@ export default function HomePage() {
 
   const supportsShare =
     typeof window !== 'undefined' && canShareFile('x.png', 'image/png');
+
+  // iOS/iPadOS 여부: 공유 시트가 '사진 앱 저장'을 제공하는 유일한 플랫폼.
+  // Android 공유 시트에는 저장 항목이 없고(앱 전송용), 다운로드가 Downloads→갤러리로
+  // 자동 반영되므로 저장은 다운로드 방식을 써야 한다.
+  const isIOS =
+    typeof navigator !== 'undefined' &&
+    (/iP(hone|ad|od)/.test(navigator.platform || '') ||
+      /iPad|iPhone|iPod/.test(navigator.userAgent || '') ||
+      // iPadOS 13+ 는 Mac으로 위장 → 터치 지원으로 구분
+      (/Macintosh/.test(navigator.userAgent || '') &&
+        typeof document !== 'undefined' &&
+        'ontouchend' in document));
+
+  // 저장 시 공유 시트를 쓸지(=iOS) 여부. iOS만 공유 시트로 사진 앱 저장 가능.
+  const saveViaShare = isIOS && supportsShare;
 
   // 방 링크 복사 (상대에게 공유)
   const copyRoomLink = async () => {
@@ -612,14 +665,19 @@ export default function HomePage() {
                     style={styles.saveBtn}
                     onClick={() => saveImage(img)}
                   >
-                    {supportsShare ? '저장 / 공유' : '저장'}
+                    {saveViaShare ? '저장 / 공유' : '저장'}
                   </button>
                 </div>
               ))}
             </div>
-            {supportsShare && (
+            {saveViaShare ? (
               <p style={styles.gHint}>
                 저장 버튼을 누르면 ‘사진’ 앱, ‘파일’ 앱 등 저장 위치를 고를 수
+                있어요.
+              </p>
+            ) : (
+              <p style={styles.gHint}>
+                저장하면 다운로드 폴더에 담기고, 사진·갤러리 앱에서도 볼 수
                 있어요.
               </p>
             )}

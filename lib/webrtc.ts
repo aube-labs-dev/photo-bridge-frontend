@@ -55,6 +55,8 @@ export interface PeerCallbacks {
   onRecvComplete: (blob: Blob, fileName: string) => void;
   // 백프레셔: 상대(수신측)가 보낸 흐름 제어 신호. 송신측에서 전송 일시정지/재개에 사용.
   onFlowControl?: (paused: boolean) => void;
+  // 송신측이 모든 파일 전송을 끝냈을 때 (수신측 notice 정리)
+  onAllDone?: () => void;
 }
 
 // Perfect Negotiation 기반 Peer 생성. handle.dc 는 송신자(impolite)가 생성하거나
@@ -178,6 +180,10 @@ function setupDataChannel(handle: PeerHandle, cb: PeerCallbacks): void {
           handle.sendPaused = false;
           cb.onLog('[Flow] resume (수신측 저장 완료)');
           cb.onFlowControl?.(false);
+        } else if (json.type === 'all_done') {
+          // 송신측이 모든 파일 전송을 끝냈음 (notice 정리용)
+          cb.onLog('[Flow] all_done (송신 완료)');
+          cb.onAllDone?.();
         }
       } catch {
         cb.onLog(`[DataChannel] text: ${data}`);
@@ -281,22 +287,39 @@ export function canShareFile(fileName: string, type: string): boolean {
 // 반환: true=공유 시트 띄움, false=미지원/취소(→ 개별 downloadBlob 폴백 권장)
 export async function shareFiles(
   files: { blob: Blob; name: string }[],
+  onLog?: (msg: string) => void,
 ): Promise<boolean> {
+  const log = onLog || (() => {});
   try {
-    if (files.length === 0) return false;
+    if (files.length === 0) {
+      log('[Share] skip: 0 files');
+      return false;
+    }
     const fileObjs = files.map(
       (f) =>
         new File([f.blob], f.name, {
           type: f.blob.type || 'application/octet-stream',
         }),
     );
-    if (navigator.canShare && navigator.canShare({ files: fileObjs })) {
+    const totalKB = Math.round(
+      fileObjs.reduce((s, f) => s + f.size, 0) / 1024,
+    );
+    const can = !!(navigator.canShare && navigator.canShare({ files: fileObjs }));
+    log(`[Share] files=${fileObjs.length} total=${totalKB}KB canShare=${can}`);
+    if (can) {
       await navigator.share({ files: fileObjs });
+      log('[Share] share() resolved (성공/저장)');
       return true;
     }
+    log('[Share] canShare=false → 폴백 필요');
     return false;
   } catch (err) {
-    if ((err as Error)?.name === 'AbortError') return true;
+    const e = err as Error;
+    if (e?.name === 'AbortError') {
+      log('[Share] 사용자 취소(AbortError)');
+      return true;
+    }
+    log(`[Share] 실패: ${e?.name} ${e?.message}`);
     return false;
   }
 }
@@ -330,5 +353,12 @@ export function sendFlowControl(handle: PeerHandle, paused: boolean): void {
   const dc = handle.dc;
   if (!dc || dc.readyState !== 'open') return;
   dc.send(JSON.stringify({ type: paused ? 'flow_pause' : 'flow_resume' }));
+}
+
+// 송신측 → 수신측: 모든 파일 전송 완료 신호 (수신측 '계속 받는 중' notice 정리)
+export function sendAllDone(handle: PeerHandle): void {
+  const dc = handle.dc;
+  if (!dc || dc.readyState !== 'open') return;
+  dc.send(JSON.stringify({ type: 'all_done' }));
 }
 
