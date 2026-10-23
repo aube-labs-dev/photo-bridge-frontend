@@ -6,6 +6,8 @@ import {
   createSendChannel,
   sendFile,
   downloadBlob,
+  shareFile,
+  canShareFile,
 } from '../lib/webrtc';
 import { Signaling } from '../lib/signaling';
 
@@ -36,6 +38,18 @@ export default function HomePage() {
   const [log, setLog] = useState<string[]>([]);
   const [showLog, setShowLog] = useState(false);
   const [notice, setNotice] = useState('');
+  // 받은 사진들 (미리보기 갤러리 + 저장 선택)
+  const [recvImages, setRecvImages] = useState<
+    { id: number; url: string; blob: Blob; name: string }[]
+  >([]);
+  // 보내기 진행 (배치)
+  const [sendBatch, setSendBatch] = useState<{
+    idx: number;
+    total: number;
+    pct: number;
+  } | null>(null);
+  const [copied, setCopied] = useState(false);
+  const recvIdRef = useRef(0);
 
   // --- WebRTC/시그널링 상태는 전부 ref (stale closure 방지) ---
   const sigRef = useRef<Signaling | null>(null);
@@ -82,10 +96,11 @@ export default function HomePage() {
         setRecvPct(total > 0 ? Math.round((received / total) * 100) : 0);
       },
       onRecvComplete: (blob, fileName) => {
-        downloadBlob(blob, fileName);
-        setRecvPct(100);
-        setNotice(`받기 완료: ${fileName}`);
-        setTimeout(() => setRecvPct(null), 1500);
+        const url = URL.createObjectURL(blob);
+        const id = ++recvIdRef.current;
+        setRecvImages((prev) => [...prev, { id, url, blob, name: fileName }]);
+        setRecvPct(null);
+        setNotice('');
       },
     }),
     [addLog],
@@ -265,27 +280,93 @@ export default function HomePage() {
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const files = Array.from(e.target.files || []);
     e.target.value = '';
-    if (!file) return;
+    if (files.length === 0) return;
     const handle = peerRef.current;
     if (!handle || !handle.dc || handle.dc.readyState !== 'open') {
       setNotice('상대와 연결되면 보낼 수 있어요.');
       return;
     }
+    const total = files.length;
     try {
-      setSendPct(0);
-      await sendFile(
-        handle,
-        file,
-        (sent, total) => setSendPct(Math.round((sent / total) * 100)),
-        addLog,
+      for (let i = 0; i < total; i++) {
+        setSendBatch({ idx: i + 1, total, pct: 0 });
+        await sendFile(
+          handle,
+          files[i],
+          (sent, t) =>
+            setSendBatch({
+              idx: i + 1,
+              total,
+              pct: t > 0 ? Math.round((sent / t) * 100) : 0,
+            }),
+          addLog,
+        );
+      }
+      setNotice(
+        total === 1 ? '사진을 보냈어요.' : `사진 ${total}장을 보냈어요.`,
       );
-      setNotice(`보내기 완료: ${file.name}`);
-      setTimeout(() => setSendPct(null), 1500);
+      setTimeout(() => setSendBatch(null), 1200);
     } catch (err) {
       setNotice(`보내기 실패: ${String(err)}`);
-      setSendPct(null);
+      setSendBatch(null);
+    }
+  };
+
+  // 받은 사진 1장 저장 (네이티브 공유 시트 → 사진/파일 앱 선택, 미지원 시 다운로드)
+  const saveImage = async (img: {
+    blob: Blob;
+    name: string;
+  }) => {
+    const shared = await shareFile(img.blob, img.name);
+    if (!shared) downloadBlob(img.blob, img.name);
+  };
+
+  // 받은 사진 전체 저장
+  const saveAllImages = async () => {
+    for (const img of recvImages) {
+      downloadBlob(img.blob, img.name);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    setNotice(`${recvImages.length}장 저장했어요.`);
+  };
+
+  const clearReceived = () => {
+    recvImages.forEach((img) => URL.revokeObjectURL(img.url));
+    setRecvImages([]);
+  };
+
+  const supportsShare =
+    typeof window !== 'undefined' && canShareFile('x.png', 'image/png');
+
+  // 방 링크 복사 (상대에게 공유)
+  const copyRoomLink = async () => {
+    const link = `${window.location.origin}/?room=${roomIdRef.current}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setNotice(link);
+    }
+  };
+
+  // 방 링크 공유 (네이티브 공유 시트)
+  const shareRoomLink = async () => {
+    const link = `${window.location.origin}/?room=${roomIdRef.current}`;
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: 'Photo Bridge',
+          text: '사진 주고받기 — 이 링크로 들어와요',
+          url: link,
+        });
+      } else {
+        copyRoomLink();
+      }
+    } catch {
+      /* 사용자 취소 */
     }
   };
 
@@ -344,6 +425,24 @@ export default function HomePage() {
           </div>
         )}
 
+        {/* 상대 대기 중: 방 공유 안내 */}
+        {joined && status !== 'connected' && (
+          <div style={styles.shareBox}>
+            <p style={styles.shareHint}>
+              상대에게 아래 링크(또는 방 번호 <b>{roomIdRef.current}</b>)를 보내
+              같은 방으로 들어오게 하세요.
+            </p>
+            <div style={styles.shareBtnRow}>
+              <button style={styles.btnShare} onClick={shareRoomLink}>
+                링크 공유
+              </button>
+              <button style={styles.btnShareGhost} onClick={copyRoomLink}>
+                {copied ? '복사됨 ✓' : '링크 복사'}
+              </button>
+            </div>
+          </div>
+        )}
+
         <div style={styles.sendBox}>
           <label
             style={{
@@ -352,10 +451,11 @@ export default function HomePage() {
               pointerEvents: canSend ? 'auto' : 'none',
             }}
           >
-            사진 보내기
+            사진 보내기 (여러 장 가능)
             <input
               type="file"
               accept="image/*"
+              multiple
               onChange={handleFileSelect}
               style={{ display: 'none' }}
             />
@@ -365,11 +465,60 @@ export default function HomePage() {
           )}
         </div>
 
-        {sendPct !== null && (
-          <Progress label="보내는 중" pct={sendPct} color="#3b82f6" />
+        {sendBatch && (
+          <Progress
+            label={
+              sendBatch.total > 1
+                ? `보내는 중 (${sendBatch.idx}/${sendBatch.total})`
+                : '보내는 중'
+            }
+            pct={sendBatch.pct}
+            color="#3b82f6"
+          />
         )}
         {recvPct !== null && (
           <Progress label={`받는 중: ${recvName}`} pct={recvPct} color="#22c55e" />
+        )}
+
+        {/* 받은 사진 갤러리 */}
+        {recvImages.length > 0 && (
+          <div style={styles.gallery}>
+            <div style={styles.galleryHead}>
+              <span style={styles.galleryTitle}>
+                받은 사진 {recvImages.length}장
+              </span>
+              <div style={styles.galleryActions}>
+                {recvImages.length > 1 && (
+                  <button style={styles.btnTiny} onClick={saveAllImages}>
+                    전체 저장
+                  </button>
+                )}
+                <button style={styles.btnTinyGhost} onClick={clearReceived}>
+                  지우기
+                </button>
+              </div>
+            </div>
+            <div style={styles.grid}>
+              {recvImages.map((img) => (
+                <div key={img.id} style={styles.thumbWrap}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={img.url} alt={img.name} style={styles.thumb} />
+                  <button
+                    style={styles.saveBtn}
+                    onClick={() => saveImage(img)}
+                  >
+                    {supportsShare ? '저장 / 공유' : '저장'}
+                  </button>
+                </div>
+              ))}
+            </div>
+            {supportsShare && (
+              <p style={styles.gHint}>
+                저장 버튼을 누르면 ‘사진’ 앱, ‘파일’ 앱 등 저장 위치를 고를 수
+                있어요.
+              </p>
+            )}
+          </div>
         )}
 
         {notice && <div style={styles.notice}>{notice}</div>}
@@ -534,5 +683,108 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.5,
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-all',
+  },
+  shareBox: {
+    marginTop: 14,
+    padding: '12px 14px',
+    background: '#f8fafc',
+    border: '1px solid #e5e7eb',
+    borderRadius: 12,
+  },
+  shareHint: { fontSize: 13, color: '#475569', margin: '0 0 10px', lineHeight: 1.5 },
+  shareBtnRow: { display: 'flex', gap: 8 },
+  btnShare: {
+    flex: 1,
+    padding: '10px',
+    background: '#3b82f6',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 10,
+    fontWeight: 600,
+    fontSize: 14,
+    cursor: 'pointer',
+  },
+  btnShareGhost: {
+    flex: 1,
+    padding: '10px',
+    background: '#fff',
+    color: '#3b82f6',
+    border: '1px solid #bfdbfe',
+    borderRadius: 10,
+    fontWeight: 600,
+    fontSize: 14,
+    cursor: 'pointer',
+  },
+  gallery: {
+    marginTop: 18,
+    padding: '14px',
+    background: '#f8fafc',
+    border: '1px solid #e5e7eb',
+    borderRadius: 14,
+  },
+  galleryHead: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  galleryTitle: { fontWeight: 700, fontSize: 15, color: '#1f2937' },
+  galleryActions: { display: 'flex', gap: 6 },
+  btnTiny: {
+    padding: '6px 10px',
+    background: '#22c55e',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 8,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  btnTinyGhost: {
+    padding: '6px 10px',
+    background: 'transparent',
+    color: '#9ca3af',
+    border: '1px solid #e5e7eb',
+    borderRadius: 8,
+    fontSize: 12,
+    cursor: 'pointer',
+  },
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, 1fr)',
+    gap: 10,
+  },
+  thumbWrap: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    background: '#fff',
+    borderRadius: 10,
+    padding: 6,
+    border: '1px solid #eef2f7',
+  },
+  thumb: {
+    width: '100%',
+    height: 120,
+    objectFit: 'cover',
+    borderRadius: 8,
+    background: '#f1f5f9',
+  },
+  saveBtn: {
+    padding: '8px',
+    background: '#eff6ff',
+    color: '#1d4ed8',
+    border: 'none',
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  gHint: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginTop: 10,
+    marginBottom: 0,
+    lineHeight: 1.5,
   },
 };

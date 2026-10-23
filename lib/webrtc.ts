@@ -240,3 +240,40 @@ export function downloadBlob(blob: Blob, fileName: string): void {
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+// 이 브라우저가 파일 공유(네이티브 공유 시트)를 지원하는지
+export function canShareFile(fileName: string, type: string): boolean {
+  try {
+    if (typeof navigator === 'undefined' || !navigator.canShare) return false;
+    const f = new File([new Blob()], fileName, {
+      type: type || 'application/octet-stream',
+    });
+    return navigator.canShare({ files: [f] });
+  } catch {
+    return false;
+  }
+}
+
+// 네이티브 공유 시트로 저장 위치 선택(사진 앱 / 파일 앱 등).
+// 반드시 사용자 탭(제스처) 핸들러 안에서 호출해야 iOS에서 동작한다.
+// 반환: true=공유 시트 띄움, false=미지원/취소(→ downloadBlob 폴백 권장)
+export async function shareFile(
+  blob: Blob,
+  fileName: string,
+): Promise<boolean> {
+  try {
+    const file = new File([blob], fileName, {
+      type: blob.type || 'application/octet-stream',
+    });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file] });
+      return true;
+    }
+    return false;
+  } catch (err) {
+    // AbortError(사용자 취소)는 정상 — 폴백 안 함
+    if ((err as Error)?.name === 'AbortError') return true;
+    return false;
+  }
+}
+
