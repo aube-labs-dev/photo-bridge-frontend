@@ -54,6 +54,8 @@ export default function HomePage() {
   >([]);
   // 배치 저장 대기: 갤러리가 MAX_RECV장을 채워 전송이 일시정지된 상태
   const [needSave, setNeedSave] = useState(false);
+  // 저장 완료 표시된 사진 id 집합 (개별/전체 저장 후 체크 뱃지)
+  const [savedIds, setSavedIds] = useState<Set<number>>(new Set());
   // 보내기 진행 (배치)
   const [sendBatch, setSendBatch] = useState<{
     idx: number;
@@ -394,6 +396,7 @@ export default function HomePage() {
 
   // 받은 사진 1장 저장. iOS=공유 시트(사진/파일 앱 선택), 그 외=다운로드(Downloads→갤러리)
   const saveImage = async (img: {
+    id: number;
     blob: Blob;
     name: string;
   }) => {
@@ -403,6 +406,16 @@ export default function HomePage() {
     } else {
       downloadBlob(img.blob, img.name);
     }
+    markSaved([img.id]);
+  };
+
+  // 저장 완료로 표시 (체크 뱃지)
+  const markSaved = (ids: number[]) => {
+    setSavedIds((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => next.add(id));
+      return next;
+    });
   };
 
   // 받은 사진 전체 저장. iOS=한 번의 공유 시트로 사진/파일 앱 선택,
@@ -410,10 +423,14 @@ export default function HomePage() {
   const saveAllImages = async () => {
     if (recvImages.length === 0) return;
     addLog(`[UI] 전체 저장 클릭: ${recvImages.length}장`);
+    const allIds = recvImages.map((img) => img.id);
     if (saveViaShare) {
       const items = recvImages.map((img) => ({ blob: img.blob, name: img.name }));
       const shared = await shareFiles(items, addLog);
-      if (shared) return; // 공유 시트에서 사용자가 저장 위치 선택
+      if (shared) {
+        markSaved(allIds);
+        return; // 공유 시트에서 사용자가 저장 위치 선택
+      }
       // iOS인데 공유 실패 → 개별 저장 안내(무반응 방지)
       setNotice(
         '저장 창을 열지 못했어요. 각 사진의 ‘저장 / 공유’ 버튼으로 한 장씩 저장해 주세요.',
@@ -425,12 +442,14 @@ export default function HomePage() {
       downloadBlob(img.blob, img.name);
       await new Promise((r) => setTimeout(r, 250));
     }
+    markSaved(allIds);
     setNotice(`${recvImages.length}장 저장했어요. (사진/다운로드 앱에서 확인)`);
   };
 
   const clearReceived = () => {
     recvImages.forEach((img) => URL.revokeObjectURL(img.url));
     setRecvImages([]);
+    setSavedIds(new Set());
   };
 
   // 배치 저장 후 계속: 현재 갤러리를 저장 → 비우고 → 송신측에 재개 신호
@@ -454,6 +473,7 @@ export default function HomePage() {
     // 갤러리 비우고 메모리 해제
     recvImages.forEach((img) => URL.revokeObjectURL(img.url));
     setRecvImages([]);
+    setSavedIds(new Set());
     setNeedSave(false);
     // 송신측에 "계속 보내" 신호
     const handle = peerRef.current;
@@ -642,11 +662,18 @@ export default function HomePage() {
             <div style={styles.galleryHead}>
               <span style={styles.galleryTitle}>
                 받은 사진 {recvImages.length}장
+                {savedIds.size > 0 && (
+                  <span style={styles.savedCount}>
+                    {' '}· {savedIds.size}장 저장됨 ✓
+                  </span>
+                )}
               </span>
               <div style={styles.galleryActions}>
                 {recvImages.length > 1 && !needSave && (
                   <button style={styles.btnTiny} onClick={saveAllImages}>
-                    전체 저장
+                    {recvImages.every((img) => savedIds.has(img.id))
+                      ? '다시 전체 저장'
+                      : '전체 저장'}
                   </button>
                 )}
                 {!needSave && (
@@ -657,18 +684,31 @@ export default function HomePage() {
               </div>
             </div>
             <div style={styles.grid}>
-              {recvImages.map((img) => (
-                <div key={img.id} style={styles.thumbWrap}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={img.url} alt={img.name} loading="lazy" style={styles.thumb} />
-                  <button
-                    style={styles.saveBtn}
-                    onClick={() => saveImage(img)}
-                  >
-                    {saveViaShare ? '저장 / 공유' : '저장'}
-                  </button>
-                </div>
-              ))}
+              {recvImages.map((img) => {
+                const saved = savedIds.has(img.id);
+                return (
+                  <div key={img.id} style={styles.thumbWrap}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={img.url}
+                      alt={img.name}
+                      loading="lazy"
+                      style={styles.thumb}
+                    />
+                    {saved && (
+                      <div style={styles.savedBadge} aria-label="저장 완료">
+                        ✓
+                      </div>
+                    )}
+                    <button
+                      style={saved ? styles.saveBtnDone : styles.saveBtn}
+                      onClick={() => saveImage(img)}
+                    >
+                      {saved ? '저장됨 ✓' : saveViaShare ? '저장 / 공유' : '저장'}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
             {saveViaShare ? (
               <p style={styles.gHint}>
@@ -955,6 +995,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 10,
   },
   thumbWrap: {
+    position: 'relative',
     display: 'flex',
     flexDirection: 'column',
     gap: 6,
@@ -980,6 +1021,33 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: 'pointer',
   },
+  saveBtnDone: {
+    padding: '8px',
+    background: '#dcfce7',
+    color: '#15803d',
+    border: 'none',
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  savedBadge: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    width: 26,
+    height: 26,
+    borderRadius: '50%',
+    background: '#22c55e',
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 800,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+  },
+  savedCount: { fontSize: 13, fontWeight: 600, color: '#15803d' },
   gHint: {
     fontSize: 12,
     color: '#94a3b8',
