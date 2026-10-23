@@ -7,6 +7,8 @@ import {
   sendFile,
   downloadBlob,
   shareFile,
+  shareFiles,
+  sendFlowControl,
   canShareFile,
 } from '../lib/webrtc';
 import { Signaling } from '../lib/signaling';
@@ -28,10 +30,12 @@ function signalingBase(): string {
   return '';
 }
 
-// 한 번에 보낼 수 있는 최대 장수
-const MAX_FILES = 50;
-// 수신 갤러리에 메모리로 유지하는 최대 장수 (초과 시 오래된 것부터 자동 저장+해제)
-const MAX_RECV = 50;
+// 한 번에 보낼 수 있는 최대 장수 (배치 저장으로 대량 전송 지원)
+const MAX_FILES = 300;
+// 수신 갤러리 배치 크기. 이 수를 채우면 전송을 잠시 멈추고 저장을 요청한다.
+// (저장 위치 선택 = 공유 시트 = 사용자 제스처 필요. iOS는 자동 사진앱 저장 불가하므로
+//  배치마다 사용자가 '저장하고 계속'을 눌러 사진앱 등으로 저장하게 한다.)
+const MAX_RECV = 100;
 
 export default function HomePage() {
   const [roomId, setRoomId] = useState('');
@@ -47,6 +51,8 @@ export default function HomePage() {
   const [recvImages, setRecvImages] = useState<
     { id: number; url: string; blob: Blob; name: string }[]
   >([]);
+  // 배치 저장 대기: 갤러리가 MAX_RECV장을 채워 전송이 일시정지된 상태
+  const [needSave, setNeedSave] = useState(false);
   // 보내기 진행 (배치)
   const [sendBatch, setSendBatch] = useState<{
     idx: number;
@@ -55,8 +61,6 @@ export default function HomePage() {
   } | null>(null);
   const [copied, setCopied] = useState(false);
   const recvIdRef = useRef(0);
-  // 링버퍼 초과분 자동저장 큐 (updater 밖, useEffect에서 소비)
-  const overflowRef = useRef<{ url: string; blob: Blob; name: string }[]>([]);
   // 방 QR 코드 canvas
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -111,15 +115,18 @@ export default function HomePage() {
         const id = ++recvIdRef.current;
         setRecvImages((prev) => {
           const next = [...prev, { id, url, blob, name: fileName }];
-          if (next.length > MAX_RECV) {
-            // 초과분은 ref 큐에 쌓아두고 useEffect에서 자동저장 처리
-            const overflow = next.slice(0, next.length - MAX_RECV);
-            overflowRef.current.push(...overflow);
-            return next.slice(next.length - MAX_RECV);
+          // 배치가 가득 차면: 송신측에 멈춰달라 요청 + 저장 UI 표시 (버리지 않음)
+          if (next.length >= MAX_RECV) {
+            const handle = peerRef.current;
+            if (handle) sendFlowControl(handle, true);
+            setNeedSave(true);
           }
           return next;
         });
         setRecvPct(null);
+      },
+      onFlowControl: () => {
+        /* 송신측 콜백 — 수신측에서는 사용 안 함 (대기는 sendFile 내부 처리) */
       },
     }),
     [addLog],
@@ -262,20 +269,6 @@ export default function HomePage() {
     [teardownPeer, wireSignaling],
   );
 
-  // 링버퍼 초과분 자동저장 (recvImages 갱신 후 큐 소비 — 부수효과를 렌더 밖에서)
-  useEffect(() => {
-    if (overflowRef.current.length === 0) return;
-    const items = overflowRef.current;
-    overflowRef.current = [];
-    items.forEach((img) => {
-      downloadBlob(img.blob, img.name);
-      URL.revokeObjectURL(img.url);
-    });
-    setNotice(
-      `받은 사진이 ${MAX_RECV}장을 넘어 오래된 사진은 자동 저장했어요.`,
-    );
-  }, [recvImages]);
-
   // 방 QR 코드 생성 (대기 중일 때 canvas에 방 링크 QR)
   useEffect(() => {
     if (!joined || status === 'connected') return;
@@ -385,8 +378,13 @@ export default function HomePage() {
     if (!shared) downloadBlob(img.blob, img.name);
   };
 
-  // 받은 사진 전체 저장
+  // 받은 사진 전체 저장 — 한 번의 공유 시트로 저장 위치(사진/파일 앱) 선택
   const saveAllImages = async () => {
+    if (recvImages.length === 0) return;
+    const items = recvImages.map((img) => ({ blob: img.blob, name: img.name }));
+    const shared = await shareFiles(items);
+    if (shared) return; // 공유 시트에서 사용자가 저장 위치 선택
+    // 공유 미지원 브라우저(데스크톱 등) 폴백: 순차 다운로드
     for (const img of recvImages) {
       downloadBlob(img.blob, img.name);
       await new Promise((r) => setTimeout(r, 300));
@@ -397,6 +395,32 @@ export default function HomePage() {
   const clearReceived = () => {
     recvImages.forEach((img) => URL.revokeObjectURL(img.url));
     setRecvImages([]);
+  };
+
+  // 배치 저장 후 계속: 현재 갤러리를 저장 → 비우고 → 송신측에 재개 신호
+  const saveBatchAndContinue = async () => {
+    if (recvImages.length > 0) {
+      const items = recvImages.map((img) => ({
+        blob: img.blob,
+        name: img.name,
+      }));
+      const shared = await shareFiles(items);
+      if (!shared) {
+        // 공유 미지원(데스크톱 등) 폴백: 순차 다운로드
+        for (const img of recvImages) {
+          downloadBlob(img.blob, img.name);
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+    }
+    // 갤러리 비우고 메모리 해제
+    recvImages.forEach((img) => URL.revokeObjectURL(img.url));
+    setRecvImages([]);
+    setNeedSave(false);
+    // 송신측에 "계속 보내" 신호
+    const handle = peerRef.current;
+    if (handle) sendFlowControl(handle, false);
+    setNotice('저장했어요. 나머지를 계속 받는 중…');
   };
 
   const supportsShare =
@@ -545,6 +569,20 @@ export default function HomePage() {
           <Progress label={`받는 중: ${recvName}`} pct={recvPct} color="#22c55e" />
         )}
 
+        {/* 배치 저장 대기: 100장 채워 전송 일시정지됨 */}
+        {needSave && (
+          <div style={styles.saveBatchBox}>
+            <p style={styles.saveBatchText}>
+              사진 {recvImages.length}장을 받았어요. 저장할 공간을 비우기 위해
+              전송을 잠시 멈췄어요. 아래 버튼으로 저장하면 나머지를 이어서
+              받아요.
+            </p>
+            <button style={styles.btnSaveBatch} onClick={saveBatchAndContinue}>
+              저장하고 계속 받기
+            </button>
+          </div>
+        )}
+
         {/* 받은 사진 갤러리 */}
         {recvImages.length > 0 && (
           <div style={styles.gallery}>
@@ -553,14 +591,16 @@ export default function HomePage() {
                 받은 사진 {recvImages.length}장
               </span>
               <div style={styles.galleryActions}>
-                {recvImages.length > 1 && (
+                {recvImages.length > 1 && !needSave && (
                   <button style={styles.btnTiny} onClick={saveAllImages}>
                     전체 저장
                   </button>
                 )}
-                <button style={styles.btnTinyGhost} onClick={clearReceived}>
-                  지우기
-                </button>
+                {!needSave && (
+                  <button style={styles.btnTinyGhost} onClick={clearReceived}>
+                    지우기
+                  </button>
+                )}
               </div>
             </div>
             <div style={styles.grid}>
@@ -758,6 +798,30 @@ const styles: Record<string, React.CSSProperties> = {
   },
   shareHint: { fontSize: 13, color: '#475569', margin: '0 0 10px', lineHeight: 1.5 },
   shareBtnRow: { display: 'flex', gap: 8 },
+  saveBatchBox: {
+    background: '#fffbeb',
+    border: '1px solid #fcd34d',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+  },
+  saveBatchText: {
+    fontSize: 14,
+    color: '#92400e',
+    margin: '0 0 12px',
+    lineHeight: 1.5,
+  },
+  btnSaveBatch: {
+    width: '100%',
+    padding: '14px',
+    fontSize: 16,
+    fontWeight: 700,
+    color: '#fff',
+    background: '#f59e0b',
+    border: 'none',
+    borderRadius: 10,
+    cursor: 'pointer',
+  },
   qrWrap: {
     display: 'flex',
     justifyContent: 'center',

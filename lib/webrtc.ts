@@ -45,6 +45,7 @@ export interface PeerHandle {
   makingOffer: boolean;
   ignoreOffer: boolean;
   polite: boolean;
+  sendPaused: boolean; // 수신측 백프레셔(flow_pause) 수신 시 true → 송신 루프 대기
 }
 
 export interface PeerCallbacks {
@@ -52,6 +53,8 @@ export interface PeerCallbacks {
   onConnectionState: (state: RTCPeerConnectionState) => void;
   onRecvProgress: (received: number, total: number, fileName: string) => void;
   onRecvComplete: (blob: Blob, fileName: string) => void;
+  // 백프레셔: 상대(수신측)가 보낸 흐름 제어 신호. 송신측에서 전송 일시정지/재개에 사용.
+  onFlowControl?: (paused: boolean) => void;
 }
 
 // Perfect Negotiation 기반 Peer 생성. handle.dc 는 송신자(impolite)가 생성하거나
@@ -73,6 +76,7 @@ export function createPeer(
     makingOffer: false,
     ignoreOffer: false,
     polite,
+    sendPaused: false,
   };
 
   pc.onicecandidate = ({ candidate }) => {
@@ -165,6 +169,15 @@ function setupDataChannel(handle: PeerHandle, cb: PeerCallbacks): void {
             cb.onRecvComplete(blob, r.meta.fileName);
             handle.receiver = null;
           }
+        } else if (json.type === 'flow_pause') {
+          // 수신측이 배치 저장을 위해 잠시 멈춰달라고 요청
+          handle.sendPaused = true;
+          cb.onLog('[Flow] pause (수신측 배치 저장 대기)');
+          cb.onFlowControl?.(true);
+        } else if (json.type === 'flow_resume') {
+          handle.sendPaused = false;
+          cb.onLog('[Flow] resume (수신측 저장 완료)');
+          cb.onFlowControl?.(false);
         }
       } catch {
         cb.onLog(`[DataChannel] text: ${data}`);
@@ -183,6 +196,7 @@ function setupDataChannel(handle: PeerHandle, cb: PeerCallbacks): void {
 }
 
 // 역압을 적용한 파일 송신. onProgress(sent, total)
+// 수신측 백프레셔(handle.sendPaused)가 걸려 있으면 전송 시작 전 대기한다.
 export async function sendFile(
   handle: PeerHandle,
   file: File,
@@ -192,6 +206,14 @@ export async function sendFile(
   const dc = handle.dc;
   if (!dc || dc.readyState !== 'open') {
     throw new Error(`DataChannel not open (state: ${dc?.readyState})`);
+  }
+
+  // 백프레셔: 수신측이 배치 저장 중이면 재개될 때까지 대기 (파일 경계에서만 멈춤)
+  while (handle.sendPaused) {
+    await new Promise((r) => setTimeout(r, 200));
+    if (dc.readyState !== 'open') {
+      throw new Error('DataChannel closed while paused');
+    }
   }
 
   // 1. 메타 전송
@@ -254,7 +276,32 @@ export function canShareFile(fileName: string, type: string): boolean {
   }
 }
 
-// 네이티브 공유 시트로 저장 위치 선택(사진 앱 / 파일 앱 등).
+// 여러 파일을 한 번의 네이티브 공유 시트로 저장(사진 앱 / 파일 앱 등).
+// 반드시 사용자 탭(제스처) 핸들러 안에서 호출해야 iOS에서 동작한다.
+// 반환: true=공유 시트 띄움, false=미지원/취소(→ 개별 downloadBlob 폴백 권장)
+export async function shareFiles(
+  files: { blob: Blob; name: string }[],
+): Promise<boolean> {
+  try {
+    if (files.length === 0) return false;
+    const fileObjs = files.map(
+      (f) =>
+        new File([f.blob], f.name, {
+          type: f.blob.type || 'application/octet-stream',
+        }),
+    );
+    if (navigator.canShare && navigator.canShare({ files: fileObjs })) {
+      await navigator.share({ files: fileObjs });
+      return true;
+    }
+    return false;
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') return true;
+    return false;
+  }
+}
+
+// 단일 파일 네이티브 공유 시트로 저장 위치 선택(사진 앱 / 파일 앱 등).
 // 반드시 사용자 탭(제스처) 핸들러 안에서 호출해야 iOS에서 동작한다.
 // 반환: true=공유 시트 띄움, false=미지원/취소(→ downloadBlob 폴백 권장)
 export async function shareFile(
@@ -275,5 +322,13 @@ export async function shareFile(
     if ((err as Error)?.name === 'AbortError') return true;
     return false;
   }
+}
+
+// 수신측 → 송신측 흐름 제어 신호 전송 (백프레셔)
+// paused=true: "배치 저장할 테니 멈춰" / false: "저장 끝났으니 계속 보내"
+export function sendFlowControl(handle: PeerHandle, paused: boolean): void {
+  const dc = handle.dc;
+  if (!dc || dc.readyState !== 'open') return;
+  dc.send(JSON.stringify({ type: paused ? 'flow_pause' : 'flow_resume' }));
 }
 
