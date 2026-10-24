@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import Head from 'next/head';
 import {
   PeerHandle,
   PeerCallbacks,
@@ -591,26 +592,35 @@ export default function HomePage() {
 
   return (
     <div style={styles.page}>
+      <Head>
+        <title>Photo Bridge — 사진 직접 주고받기</title>
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1, viewport-fit=cover"
+        />
+      </Head>
       <div style={styles.card}>
         <h1 style={styles.title}>📷 Photo Bridge</h1>
         <p style={styles.sub}>
           ‘새 방 만들기’ 후 QR·링크로 상대를 초대하면 사진을 직접 주고받아요.
         </p>
 
-        <div style={styles.statusRow}>
-          <span
-            style={{
-              ...styles.dot,
-              background:
-                status === 'connected'
-                  ? '#22c55e'
-                  : status === 'disconnected'
-                    ? '#ef4444'
-                    : '#f59e0b',
-            }}
-          />
-          <span>{statusLabel[status]}</span>
-        </div>
+        {joined && (
+          <div style={styles.statusRow}>
+            <span
+              style={{
+                ...styles.dot,
+                background:
+                  status === 'connected'
+                    ? '#22c55e'
+                    : status === 'disconnected'
+                      ? '#ef4444'
+                      : '#f59e0b',
+              }}
+            />
+            <span>{statusLabel[status]}</span>
+          </div>
+        )}
 
         {!joined ? (
           <div style={styles.joinWrap}>
@@ -649,8 +659,7 @@ export default function HomePage() {
         {joined && status !== 'connected' && (
           <div style={styles.shareBox}>
             <p style={styles.shareHint}>
-              상대가 아래 QR을 스캔하거나, 링크(방 번호 <b>{roomIdRef.current}</b>)로
-              같은 방에 들어오면 연결돼요.
+              상대가 아래 QR을 스캔하거나 링크로 같은 방에 들어오면 연결돼요.
             </p>
             <div style={styles.qrWrap}>
               <canvas ref={qrCanvasRef} style={styles.qrCanvas} />
@@ -666,27 +675,21 @@ export default function HomePage() {
           </div>
         )}
 
-        <div style={styles.sendBox}>
-          <label
-            style={{
-              ...styles.fileLabel,
-              opacity: canSend ? 1 : 0.5,
-              pointerEvents: canSend ? 'auto' : 'none',
-            }}
-          >
-            사진 보내기 (여러 장 가능)
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={handleFileSelect}
-              style={{ display: 'none' }}
-            />
-          </label>
-          {!canSend && joined && (
-            <p style={styles.hint}>상대가 들어오면 전송할 수 있어요.</p>
-          )}
-        </div>
+        {/* 사진 보내기: 연결된 상태에서만 노출 */}
+        {canSend && (
+          <div style={styles.sendBox}>
+            <label style={styles.fileLabel}>
+              사진 보내기 (여러 장 가능)
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={handleFileSelect}
+                style={{ display: 'none' }}
+              />
+            </label>
+          </div>
+        )}
 
         {sendBatch && (
           <Progress
@@ -729,20 +732,20 @@ export default function HomePage() {
                   </span>
                 )}
               </span>
-              <div style={styles.galleryActions}>
-                {recvImages.length > 1 && !needSave && (
-                  <button style={styles.btnTiny} onClick={saveAllImages}>
-                    {recvImages.every((img) => savedIds.has(img.id))
-                      ? '다시 전체 저장'
-                      : '전체 저장'}
-                  </button>
-                )}
-                {!needSave && (
+              {!needSave && (
+                <div style={styles.galleryActions}>
+                  {recvImages.length > 1 && (
+                    <button style={styles.btnTiny} onClick={saveAllImages}>
+                      {recvImages.every((img) => savedIds.has(img.id))
+                        ? '다시 전체 저장'
+                        : '전체 저장'}
+                    </button>
+                  )}
                   <button style={styles.btnTinyGhost} onClick={clearReceived}>
                     지우기
                   </button>
-                )}
-              </div>
+                </div>
+              )}
             </div>
             <div style={styles.grid}>
               {recvImages.map((img) => {
@@ -787,10 +790,13 @@ export default function HomePage() {
 
         {notice && <div style={styles.notice}>{notice}</div>}
 
-        <button style={styles.logToggle} onClick={() => setShowLog((v) => !v)}>
-          {showLog ? '로그 숨기기' : '로그 보기'}
-        </button>
-        {showLog && (
+        {/* 로그: 입장 후에만 노출(디버깅용), 미입장 첫 화면은 깔끔하게 */}
+        {joined && (
+          <button style={styles.logToggle} onClick={() => setShowLog((v) => !v)}>
+            {showLog ? '로그 숨기기' : '로그 보기'}
+          </button>
+        )}
+        {joined && showLog && (
           <pre style={styles.logBox}>
             {log.map((m, i) => (
               <div key={i}>{m}</div>
@@ -1044,14 +1050,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   galleryHead: {
     display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: 'column',
+    gap: 8,
     marginBottom: 10,
   },
   galleryTitle: { fontWeight: 700, fontSize: 15, color: '#1f2937' },
   galleryActions: { display: 'flex', gap: 6 },
   btnTiny: {
-    padding: '6px 10px',
+    padding: '6px 12px',
     background: '#22c55e',
     color: '#fff',
     border: 'none',
@@ -1059,15 +1065,17 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     fontWeight: 600,
     cursor: 'pointer',
+    whiteSpace: 'nowrap',
   },
   btnTinyGhost: {
-    padding: '6px 10px',
+    padding: '6px 12px',
     background: 'transparent',
     color: '#9ca3af',
     border: '1px solid #e5e7eb',
     borderRadius: 8,
     fontSize: 12,
     cursor: 'pointer',
+    whiteSpace: 'nowrap',
   },
   grid: {
     display: 'grid',
