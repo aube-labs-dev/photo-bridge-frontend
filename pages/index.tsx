@@ -347,6 +347,26 @@ export default function HomePage() {
       setNotice('방 번호를 입력하세요.');
       return;
     }
+    joinRoomById(id);
+  };
+
+  // 난수 방 생성 후 바로 입장 (사용자가 번호를 생각할 필요 없음)
+  const handleCreateRoom = () => {
+    // 6자리 숫자 (앞자리 0 방지: 100000~999999)
+    let id: string;
+    try {
+      const buf = new Uint32Array(1);
+      crypto.getRandomValues(buf);
+      id = String(100000 + (buf[0] % 900000));
+    } catch {
+      id = String(100000 + Math.floor(Math.random() * 900000));
+    }
+    setRoomId(id);
+    joinRoomById(id);
+  };
+
+  // 공통 입장 로직 (번호 입력 입장 / 난수 생성 입장 공용)
+  const joinRoomById = (id: string) => {
     roomIdRef.current = id;
     setJoined(true);
     setNotice('');
@@ -573,7 +593,9 @@ export default function HomePage() {
     <div style={styles.page}>
       <div style={styles.card}>
         <h1 style={styles.title}>📷 Photo Bridge</h1>
-        <p style={styles.sub}>같은 방 번호를 입력하면 사진을 직접 주고받아요.</p>
+        <p style={styles.sub}>
+          ‘새 방 만들기’ 후 QR·링크로 상대를 초대하면 사진을 직접 주고받아요.
+        </p>
 
         <div style={styles.statusRow}>
           <span
@@ -591,19 +613,28 @@ export default function HomePage() {
         </div>
 
         {!joined ? (
-          <div style={styles.joinRow}>
-            <input
-              style={styles.input}
-              type="text"
-              inputMode="numeric"
-              placeholder="방 번호 (예: 1234)"
-              value={roomId}
-              onChange={(e) => setRoomId(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleJoin()}
-            />
-            <button style={styles.btnPrimary} onClick={handleJoin}>
-              입장
+          <div style={styles.joinWrap}>
+            {/* 주 액션: 난수 방 만들기 */}
+            <button style={styles.btnCreate} onClick={handleCreateRoom}>
+              + 새 방 만들기
             </button>
+            <div style={styles.orDivider}>
+              <span style={styles.orText}>또는 받은 방 번호로 입장</span>
+            </div>
+            <div style={styles.joinRow}>
+              <input
+                style={styles.input}
+                type="text"
+                inputMode="numeric"
+                placeholder="방 번호 (예: 123456)"
+                value={roomId}
+                onChange={(e) => setRoomId(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleJoin()}
+              />
+              <button style={styles.btnPrimary} onClick={handleJoin}>
+                입장
+              </button>
+            </div>
           </div>
         ) : (
           <div style={styles.joinedBox}>
@@ -821,6 +852,25 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: 16,
   },
   dot: { width: 10, height: 10, borderRadius: '50%', display: 'inline-block' },
+  joinWrap: { display: 'flex', flexDirection: 'column', gap: 12 },
+  btnCreate: {
+    width: '100%',
+    padding: '15px',
+    background: '#2563eb',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 12,
+    fontSize: 17,
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  orDivider: {
+    display: 'flex',
+    alignItems: 'center',
+    textAlign: 'center',
+    margin: '2px 0',
+  },
+  orText: { fontSize: 12, color: '#94a3b8', width: '100%' },
   joinRow: { display: 'flex', gap: 8 },
   input: {
     flex: 1,
