@@ -74,6 +74,9 @@ export default function HomePage() {
   const remoteIdRef = useRef<string | null>(null);
   const roomIdRef = useRef('');
   const iceServersRef = useRef<RTCIceServer[] | undefined>(undefined);
+  // 이 방에서 한 번이라도 실제 P2P 연결(connected)에 성공한 적 있는지.
+  // 연결 성사 전 상대가 빠지면(예: iOS 같은 폰 두 브라우저 ICE 실패) '나갔어요'를 띄우지 않기 위함.
+  const everConnectedRef = useRef(false);
 
   const addLog = useCallback((msg: string) => {
     // eslint-disable-next-line no-console
@@ -104,6 +107,7 @@ export default function HomePage() {
       onLog: addLog,
       onConnectionState: (st) => {
         if (st === 'connected') {
+          everConnectedRef.current = true;
           setStatus('connected');
           setNotice(''); // 재연결 완료 시 '상대가 나갔어요' 등 이전 안내 제거
         } else if (st === 'failed' || st === 'disconnected' || st === 'closed') {
@@ -218,7 +222,15 @@ export default function HomePage() {
       sig.on('peer_left', () => {
         addLog('[Room] peer left');
         teardownPeer();
-        setNotice('상대가 나갔어요.');
+        // 실제로 한 번이라도 연결됐던 경우에만 '나갔어요'를 띄운다.
+        // 연결 성사 전(ICE 핸드셰이크 미완)에 상대가 빠진 경우—예: iOS 같은 폰에서
+        // 두 브라우저로 시도 시 백그라운드 쪽 answer가 안 와 연결이 안 되는 상황—에는
+        // '나갔어요' 대신 조용히 대기 상태를 유지한다(모순 메시지 방지).
+        if (everConnectedRef.current) {
+          setNotice('상대가 나갔어요.');
+        } else {
+          setNotice('');
+        }
         setStatus('waiting');
       });
 
@@ -277,6 +289,7 @@ export default function HomePage() {
       setSavedIds(new Set());
       setNeedSave(false);
       setNotice('');
+      everConnectedRef.current = false; // 새 방 입장 → 연결 성공 이력 리셋
       const base = signalingBase();
       // 탭별 고유 키(ck): iOS 백그라운드 복귀 등 재접속 시 서버가 같은 ck의
       // 좀비 소켓을 교체하도록 해 room_full 오거부를 방지한다.
