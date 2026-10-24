@@ -266,6 +266,16 @@ export default function HomePage() {
       // 기존 연결 정리
       sigRef.current?.disconnect();
       teardownPeer();
+      // 새 방 입장 → 이전 방에서 받은 사진/저장상태/안내 초기화
+      // (connectRoom은 사용자가 방에 입장할 때만 호출됨. iOS 복귀 등 자동 재연결은
+      //  signaling 내부에서 처리되어 여기로 오지 않으므로 갤러리를 비워도 안전하다.)
+      setRecvImages((prev) => {
+        prev.forEach((img) => URL.revokeObjectURL(img.url));
+        return [];
+      });
+      setSavedIds(new Set());
+      setNeedSave(false);
+      setNotice('');
       const base = signalingBase();
       // 탭별 고유 키(ck): iOS 백그라운드 복귀 등 재접속 시 서버가 같은 ck의
       // 좀비 소켓을 교체하도록 해 room_full 오거부를 방지한다.
@@ -340,6 +350,12 @@ export default function HomePage() {
     roomIdRef.current = id;
     setJoined(true);
     setNotice('');
+    // 브라우저 URL을 현재 방으로 갱신 → 새로고침해도 이 방으로 복귀
+    try {
+      window.history.replaceState(null, '', `/?room=${encodeURIComponent(id)}`);
+    } catch {
+      /* noop */
+    }
     connectRoom(id);
   };
 
@@ -349,6 +365,20 @@ export default function HomePage() {
     roomIdRef.current = '';
     setJoined(false);
     setStatus('disconnected');
+    // URL의 ?room= 제거 → 새로고침해도 이전 방으로 자동 입장하지 않음
+    try {
+      window.history.replaceState(null, '', '/');
+    } catch {
+      /* noop */
+    }
+    // 받은 사진/저장상태/안내 초기화 (나가면 깨끗하게)
+    setRecvImages((prev) => {
+      prev.forEach((img) => URL.revokeObjectURL(img.url));
+      return [];
+    });
+    setSavedIds(new Set());
+    setNeedSave(false);
+    setNotice('');
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
