@@ -816,6 +816,17 @@ export default function HomePage() {
             ))}
           </pre>
         )}
+
+        <div style={styles.footer}>
+          <a
+            href="https://buymeacoffee.com/aubelabs"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={styles.donate}
+          >
+            ☕ 개발자에게 커피 한 잔
+          </a>
+        </div>
       </div>
     </div>
   );
@@ -972,6 +983,17 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     cursor: 'pointer',
     textDecoration: 'underline',
+  },
+  footer: {
+    marginTop: 24,
+    paddingTop: 16,
+    borderTop: '1px solid #f1f5f9',
+    textAlign: 'center',
+  },
+  donate: {
+    color: '#9ca3af',
+    fontSize: 13,
+    textDecoration: 'none',
   },
   logBox: {
     marginTop: 8,
