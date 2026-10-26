@@ -818,14 +818,21 @@ export default function HomePage() {
         )}
 
         <div style={styles.footer}>
-          <a
-            href="https://buymeacoffee.com/aubelabs"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={styles.donate}
-          >
-            ☕ 개발자에게 커피 한 잔
-          </a>
+          <img
+            src="/brand/aube-labs-horizontal.svg"
+            alt="Aube Labs"
+            style={styles.brandLogo}
+          />
+          <div>
+            <a
+              href="https://buymeacoffee.com/aubelabs"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={styles.donate}
+            >
+              ☕ 개발자에게 커피 한 잔
+            </a>
+          </div>
         </div>
       </div>
     </div>
@@ -989,6 +996,12 @@ const styles: Record<string, React.CSSProperties> = {
     paddingTop: 16,
     borderTop: '1px solid #f1f5f9',
     textAlign: 'center',
+  },
+  brandLogo: {
+    height: 32,
+    width: 'auto',
+    opacity: 0.85,
+    marginBottom: 10,
   },
   donate: {
     color: '#9ca3af',

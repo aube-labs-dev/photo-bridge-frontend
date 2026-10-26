@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300" viewBox="0 0 900 300">
+<defs>
+  <linearGradient id="goldL" x1="0.4" y1="0" x2="0.6" y2="1"><stop offset="0" stop-color="#fde68a"/><stop offset="0.35" stop-color="#fcd34d"/>
+    <stop offset="0.75" stop-color="#ffffff"/><stop offset="1" stop-color="#e2e8f0"/></linearGradient>
+  <linearGradient id="blueR" x1="0.4" y1="0" x2="0.6" y2="1">
+    <stop offset="0" stop-color="#93c5fd"/><stop offset="0.5" stop-color="#3b82f6"/><stop offset="1" stop-color="#1d4ed8"/>
+  </linearGradient>
+</defs>
+<g transform="translate(40,32.2) scale(0.46)">
+  <path d="M188.8 332 L323.2 332" stroke="#cbd5e1" stroke-width="64" fill="none" stroke-linecap="round"/>
+    <path d="M256 128 L368.0 400" stroke="url(#blueR)" stroke-width="72" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M144.0 400 L256 128" stroke="url(#goldL)" stroke-width="72" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="256" cy="128" r="11" fill="#fffbeb"/>
+</g>
+<text x="340" y="155" font-family="'Helvetica Neue', Arial, sans-serif" font-size="100" font-weight="600" fill="#1e293b" letter-spacing="2">aube</text>
+<text x="344" y="212" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="400" fill="#94a3b8" letter-spacing="18">LABS</text>
+</svg>
